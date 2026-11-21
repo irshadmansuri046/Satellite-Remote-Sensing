@@ -1,0 +1,90 @@
+services:
+  db:
+    image: postgis/postgis:15-3.3
+    container_name: farm_postgis_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: farm_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgis_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d farm_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: farm_redis_queue
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: farm_api_server
+    restart: always
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - farm_processed_data:/tmp/farm_sensing/processed
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/farm_db
+      - SYNC_DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/farm_db
+      - REDIS_URL=redis://redis:6379/0
+      - SATELLITE_MOCK=true  # Default to mock satellite service locally for development
+      # - R2_ENDPOINT_URL=
+      # - R2_ACCESS_KEY_ID=
+      # - R2_SECRET_ACCESS_KEY=
+      # - R2_BUCKET_NAME=farm-rasters
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: farm_celery_worker
+    restart: always
+    command: celery -A app.infrastructure.queue.celery_app worker --loglevel=info
+    volumes:
+      - .:/app
+      - farm_processed_data:/tmp/farm_sensing/processed
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/farm_db
+      - SYNC_DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/farm_db
+      - REDIS_URL=redis://redis:6379/0
+      - SATELLITE_MOCK=true
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgis_data:
+  redis_data:
+  farm_processed_data:
